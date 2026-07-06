@@ -1,6 +1,7 @@
 import json
 import io
 import base64
+import os
 import numpy as np
 import streamlit as st
 from PIL import Image
@@ -21,6 +22,9 @@ CLASS_NAMES_PATH = "class_names.json"
 OOD_CONFIDENCE_THRESHOLD = 0.70
 
 st.set_page_config(page_title="Currency Recognition System", page_icon="💵", layout="wide")
+
+# Suppress TF warnings for cleaner logs
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # --------------------------------------------------------------------------
 # Design system
@@ -181,22 +185,21 @@ st.markdown("""
     }
     .svs-chip-row { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 1rem; }
 
-    /* Vision badge for chatbot */
-    .svs-vision-badge {
-        display: inline-flex; align-items: center; gap: 0.35rem;
-        background: rgba(34, 168, 118, 0.12); border: 1px solid rgba(34, 168, 118, 0.35);
-        border-radius: 6px; padding: 0.2rem 0.55rem; font-size: 0.68rem;
-        font-family: 'IBM Plex Mono', monospace; color: var(--thread-a);
-        letter-spacing: 0.05em; margin-left: 0.5rem;
-    }
-
     hr { border-color: var(--line) !important; }
     </style>
 """, unsafe_allow_html=True)
 
-@st.cache_resource
+@st.cache_resource(show_spinner="Loading model...")
 def load_model_and_labels():
-    model = tf.keras.models.load_model(MODEL_PATH)
+    """Load the trained model and class names with error handling."""
+    try:
+        # Try loading with Keras 3 (TF 2.16+) first
+        model = tf.keras.models.load_model(MODEL_PATH)
+    except Exception as e:
+        st.error(f"Error loading model: {e}")
+        st.info("Make sure 'currency_model.keras' and 'class_names.json' are in the repo.")
+        raise
+
     with open(CLASS_NAMES_PATH, 'r') as f:
         class_names = json.load(f)
     return model, class_names
@@ -215,36 +218,48 @@ st.markdown('<div class="svs-title">💵 Indian Currency Recognition System</div
 st.markdown(
     '<div class="svs-subtitle">Upload a photo of a banknote to identify its denomination, '
     'verify it against the official RBI security-feature checklist, and ask the '
-    'assistant on the right about currency rules and guidelines. The assistant can '
-    '<strong>see your uploaded image</strong> and answer questions about it!</div>',
+    'assistant on the right about currency rules and guidelines.</div>',
     unsafe_allow_html=True
 )
 
-model, class_names = load_model_and_labels()
+# Check if model files exist
+model_exists = os.path.exists(MODEL_PATH)
+labels_exists = os.path.exists(CLASS_NAMES_PATH)
+
+if not model_exists or not labels_exists:
+    st.error("⚠️ Model files not found!")
+    st.markdown(f"""
+    <div class="svs-card">
+        <p>Please ensure the following files are in your repository:</p>
+        <ul>
+            <li><code>currency_model.keras</code> — {"✅ Found" if model_exists else "❌ Missing"}</li>
+            <li><code>class_names.json</code> — {"✅ Found" if labels_exists else "❌ Missing"}</li>
+        </ul>
+        <p>Run the training notebook in Google Colab to generate these files.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    st.stop()
+
+try:
+    model, class_names = load_model_and_labels()
+except Exception:
+    st.stop()
 
 col1, col2, col3 = st.columns([1, 1.4, 1.1])
-
-# Track the uploaded image in session state so the chatbot can access it
-uploaded_image = None
 
 with col1:
     st.markdown('<div class="svs-section-label">01 — Upload</div>', unsafe_allow_html=True)
     uploaded_file = st.file_uploader("Upload a banknote photo...", type=["jpg", "jpeg", "png"])
     if uploaded_file:
-        uploaded_image = Image.open(uploaded_file)
-        # Store in session state for chatbot access
-        st.session_state["uploaded_image"] = uploaded_image
-        st.image(uploaded_image, caption="Uploaded Image", use_container_width=True)
-    else:
-        # Clear stored image if none uploaded
-        st.session_state.pop("uploaded_image", None)
+        image = Image.open(uploaded_file)
+        st.image(image, caption="Uploaded Image", use_container_width=True)
 
 is_confident = False
 predicted_label = None
 
 with col2:
-    if uploaded_file and uploaded_image:
-        img_tensor = preprocess_image(uploaded_image)
+    if uploaded_file:
+        img_tensor = preprocess_image(image)
         preds = model.predict(img_tensor, verbose=0)[0]
 
         top_idx = int(np.argmax(preds))
@@ -321,7 +336,7 @@ with col2:
 
 st.divider()
 
-if uploaded_file and uploaded_image and is_confident:
+if uploaded_file and is_confident:
     info = get_security_info(predicted_label)
     if info:
         base_colour = info.get("base_colour", "N/A")
@@ -372,27 +387,20 @@ if uploaded_file and uploaded_image and is_confident:
         """, unsafe_allow_html=True)
 
 # --------------------------------------------------------------------------
-# 04 — RBI Guidelines Assistant (right-side chatbot panel) with VISION
+# 04 — RBI Guidelines Assistant (right-side chatbot panel)
 # --------------------------------------------------------------------------
 with col3:
     st.markdown('<div class="svs-section-label">04 — RBI Guidelines Assistant</div>', unsafe_allow_html=True)
 
-    # Determine vision status
-    has_image = "uploaded_image" in st.session_state
-    gemini_ready = is_gemini_configured()
-
-    if gemini_ready:
-        if has_image:
-            status_html = '<span style="color:var(--thread-a);">● Live AI (Gemini) + Vision</span>'
-        else:
-            status_html = '<span style="color:var(--thread-a);">● Live AI (Gemini)</span>'
+    if is_gemini_configured():
+        status_html = '<span style="color:var(--thread-a);">● Live AI (Gemini)</span>'
     else:
         status_html = '<span style="color:var(--warn);">● Offline mode — no API key set</span>'
 
     st.markdown(
         f'<div class="svs-chat-intro">Ask anything — general knowledge or '
-        f'RBI-specific. The assistant can <strong>see your uploaded image</strong> '
-        f'and answer questions about it. {status_html}</div>',
+        f'RBI-specific — with a focus on currency rules and guidelines. '
+        f'{status_html}</div>',
         unsafe_allow_html=True
     )
 
@@ -400,29 +408,19 @@ with col3:
         st.session_state.chat_history = [
             {
                 "role": "assistant",
-                "content": (
-                    "Hi! I can see your uploaded banknote image and answer questions about it. "
-                    "Try asking: 'Is this note genuine?' or 'What security features should I check?' "
-                    "Or ask general RBI questions like 'Is the 2000 note still legal?'"
-                ),
+                "content": "Hi! Ask me anything — general knowledge or "
+                           "currency-specific, like \"is the 2000 note "
+                           "still legal tender?\" or \"what do I do with "
+                           "a fake note?\"",
             }
         ]
 
-    # Vision-aware suggested questions
-    if has_image:
-        suggested_questions = [
-            "Is this note genuine?",
-            "What security features should I check?",
-            "Can you see the watermark in this image?",
-            "What denomination is this?",
-        ]
-    else:
-        suggested_questions = [
-            "Is the 2000 note still legal tender?",
-            "What if I get a fake note?",
-            "How do I exchange a torn note?",
-            "Where is Indian currency printed?",
-        ]
+    suggested_questions = [
+        "Is the 2000 note still legal tender?",
+        "What if I get a fake note?",
+        "How do I exchange a torn note?",
+        "Where is Indian currency printed?",
+    ]
 
     chat_container = st.container(height=340)
     with chat_container:
@@ -435,18 +433,14 @@ with col3:
         if chip_cols[i % 2].button(question, key=f"chip_{i}", use_container_width=True):
             history_so_far = list(st.session_state.chat_history)
             st.session_state.chat_history.append({"role": "user", "content": question})
-            # Pass the image if available
-            img = st.session_state.get("uploaded_image")
-            answer, _source = get_chatbot_response(question, history=history_so_far, image=img)
+            answer, _source = get_chatbot_response(question, history=history_so_far)
             st.session_state.chat_history.append({"role": "assistant", "content": answer})
             st.rerun()
 
-    user_question = st.chat_input("Ask about RBI guidelines or your uploaded image...")
+    user_question = st.chat_input("Ask about RBI guidelines or anything else...")
     if user_question:
         history_so_far = list(st.session_state.chat_history)
         st.session_state.chat_history.append({"role": "user", "content": user_question})
-        # Pass the image if available
-        img = st.session_state.get("uploaded_image")
-        answer, _source = get_chatbot_response(user_question, history=history_so_far, image=img)
+        answer, _source = get_chatbot_response(user_question, history=history_so_far)
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
         st.rerun()
