@@ -2,6 +2,7 @@ import json
 import io
 import base64
 import os
+import sys
 import numpy as np
 import streamlit as st
 from PIL import Image
@@ -193,7 +194,6 @@ st.markdown("""
 def load_model_and_labels():
     """Load the trained model and class names with error handling."""
     try:
-        # Try loading with Keras 3 (TF 2.16+) first
         model = tf.keras.models.load_model(MODEL_PATH)
     except Exception as e:
         st.error(f"Error loading model: {e}")
