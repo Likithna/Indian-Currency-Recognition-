@@ -335,20 +335,31 @@ def is_gemini_configured() -> bool:
 
 def get_chatbot_response(query: str, history: list | None = None, image: Image.Image | None = None):
     """
-    Returns (answer_text, source) where source is 'gemini' or 'offline'.
-    If an image is provided and Gemini is configured, the image is sent
-    along with the query for vision-based responses.
+    Returns (answer_text, source, error_detail).
+      source is 'gemini' or 'offline'.
+      error_detail is None on success, or a short diagnostic string when
+      Gemini was configured but the call actually failed (bad key, rate
+      limit, network issue, wrong model, etc) — surfaced in the UI so
+      failures are debuggable instead of silently hidden.
     """
     if not query or not query.strip():
-        return FALLBACK_UNMATCHED, "offline"
+        return FALLBACK_UNMATCHED, "offline", None
+
+    api_key = _get_api_key()
+    if not api_key:
+        return _offline_answer(query), "offline", "no_api_key"
 
     try:
         answer = _call_gemini(query, history, image)
-        return answer, "gemini"
-    except Exception:
-        # If image was provided but Gemini failed, we can't do vision offline
-        # Still try text-only offline as a graceful fallback
-        return _offline_answer(query), "offline"
+        return answer, "gemini", None
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else "?"
+        body = e.response.text[:300] if e.response is not None else str(e)
+        return _offline_answer(query), "offline", f"HTTP {status}: {body}"
+    except requests.exceptions.RequestException as e:
+        return _offline_answer(query), "offline", f"Network error: {type(e).__name__}: {e}"
+    except Exception as e:
+        return _offline_answer(query), "offline", f"{type(e).__name__}: {e}"
 
 
 if __name__ == "__main__":

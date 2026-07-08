@@ -247,6 +247,8 @@ except Exception:
 
 col1, col2, col3 = st.columns([1, 1.4, 1.1])
 
+image = None
+
 with col1:
     st.markdown('<div class="svs-section-label">01 — Upload</div>', unsafe_allow_html=True)
     uploaded_file = st.file_uploader("Upload a banknote photo...", type=["jpg", "jpeg", "png"])
@@ -392,8 +394,11 @@ if uploaded_file and is_confident:
 with col3:
     st.markdown('<div class="svs-section-label">04 — RBI Guidelines Assistant</div>', unsafe_allow_html=True)
 
-    if is_gemini_configured():
+    _last_error = st.session_state.get("last_chat_error")
+    if is_gemini_configured() and not (_last_error and _last_error != "no_api_key"):
         status_html = '<span style="color:var(--thread-a);">● Live AI (Gemini)</span>'
+    elif is_gemini_configured():
+        status_html = '<span style="color:var(--warn);">● Key set, but last call failed — see debug info below</span>'
     else:
         status_html = '<span style="color:var(--warn);">● Offline mode — no API key set</span>'
 
@@ -428,19 +433,37 @@ with col3:
             with st.chat_message(msg["role"]):
                 st.write(msg["content"])
 
+    last_error = st.session_state.get("last_chat_error")
+    if last_error and last_error != "no_api_key":
+        with st.expander("⚠ Live AI call failed — debug info"):
+            st.code(last_error)
+            st.caption(
+                "Common causes: API key not set in this deployment's "
+                "Secrets, key pasted with extra spaces/quotes, free-tier "
+                "rate limit hit (many requests in a short time), or a "
+                "network restriction. Share this exact message if you "
+                "need help diagnosing it further."
+            )
+
     chip_cols = st.columns(2)
     for i, question in enumerate(suggested_questions):
         if chip_cols[i % 2].button(question, key=f"chip_{i}", use_container_width=True):
             history_so_far = list(st.session_state.chat_history)
             st.session_state.chat_history.append({"role": "user", "content": question})
-            answer, _source = get_chatbot_response(question, history=history_so_far)
+            answer, _source, error_detail = get_chatbot_response(
+                question, history=history_so_far, image=image
+            )
             st.session_state.chat_history.append({"role": "assistant", "content": answer})
+            st.session_state.last_chat_error = error_detail
             st.rerun()
 
     user_question = st.chat_input("Ask about RBI guidelines or anything else...")
     if user_question:
         history_so_far = list(st.session_state.chat_history)
         st.session_state.chat_history.append({"role": "user", "content": user_question})
-        answer, _source = get_chatbot_response(user_question, history=history_so_far)
+        answer, _source, error_detail = get_chatbot_response(
+            user_question, history=history_so_far, image=image
+        )
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
+        st.session_state.last_chat_error = error_detail
         st.rerun()
