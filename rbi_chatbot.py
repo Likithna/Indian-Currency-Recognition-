@@ -125,12 +125,14 @@ ACCESSIBILITY_PROMPT = (
     "You are helping a visually impaired person identify an Indian "
     "currency note from a photo. This is an INDEPENDENT check — ignore "
     "any other classifier's prediction, look only at the image yourself. "
-    "Respond with ONE short, clear sentence suitable for text-to-speech, "
-    "e.g. 'This is a five hundred rupee note.' Spell the denomination out "
-    "in words, not digits, since digits read awkwardly aloud. If you "
-    "cannot clearly identify an Indian currency note in the image, say so "
-    "plainly instead, e.g. 'I cannot clearly identify a currency note in "
-    "this image.' Do not add any extra commentary, caveats, or disclaimers."
+    "Respond with ONLY the denomination — nothing else. No sentence, no "
+    "'This is a...', no punctuation, no extra words. "
+    "Valid complete responses look EXACTLY like one of these: "
+    "'Ten Rupees', 'Twenty Rupees', 'Fifty Rupees', 'Hundred Rupees', "
+    "'Two Hundred Rupees', 'Five Hundred Rupees', 'Two Thousand Rupees', "
+    "or 'Not a currency note' if you can't clearly identify one. "
+    "Spell numbers as words, not digits, since digits read awkwardly "
+    "aloud. Output nothing beyond that short phrase."
 )
 
 
@@ -162,7 +164,7 @@ def identify_note_for_speech(image: Image.Image):
         payload = {
             "contents": contents,
             "systemInstruction": {"parts": [{"text": ACCESSIBILITY_PROMPT}]},
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 60},
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 20},
         }
         response = requests.post(
             GEMINI_URL,
