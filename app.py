@@ -5,13 +5,14 @@ import os
 import sys
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 import tensorflow as tf
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from security_features import get_security_info
-from rbi_chatbot import get_chatbot_response, is_gemini_configured
+from rbi_chatbot import get_chatbot_response, is_gemini_configured, identify_note_for_speech
 
 # --------------------------------------------------------------------------
 # Config
@@ -20,7 +21,14 @@ IMG_SIZE = (224, 224)
 MODEL_PATH = "currency_model.keras"
 CLASS_NAMES_PATH = "class_names.json"
 
-OOD_CONFIDENCE_THRESHOLD = 0.70
+# A hard-but-genuine photo (distant, rotated, cluttered background) can
+# score lower confidence than a confidently-wrong guess on something
+# unrelated — that's a real limit of softmax confidence, not something a
+# threshold alone fully fixes. Lowered from 0.70, and paired with a margin
+# check below (how far the top guess leads the runner-up) so it's not
+# just a looser single number.
+OOD_CONFIDENCE_THRESHOLD = 0.45
+OOD_MARGIN_THRESHOLD = 0.12
 
 st.set_page_config(page_title="Currency Recognition System", page_icon="💵", layout="wide")
 
@@ -209,6 +217,27 @@ def preprocess_image(image):
     img_array = np.array(image).astype('float32')
     return np.expand_dims(img_array, axis=0)
 
+def speak_text(text: str, key: str = "tts"):
+    """
+    Speaks text aloud using the browser's built-in Web Speech API — free,
+    no extra API call needed for the audio itself, works in all major
+    browsers. Triggered only from a button click (a real user gesture),
+    which satisfies browsers' autoplay restrictions on speech synthesis.
+    """
+    safe = text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+    components.html(f"""
+        <script>
+        (function() {{
+            try {{
+                window.speechSynthesis.cancel();
+                var msg = new SpeechSynthesisUtterance("{safe}");
+                msg.rate = 0.95;
+                window.speechSynthesis.speak(msg);
+            }} catch (e) {{ console.error("Speech synthesis failed:", e); }}
+        }})();
+        </script>
+    """, height=0)
+
 # --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
@@ -267,7 +296,16 @@ with col2:
         top_idx = int(np.argmax(preds))
         predicted_label = class_names[top_idx]
         confidence = float(preds[top_idx])
-        is_confident = confidence >= OOD_CONFIDENCE_THRESHOLD
+
+        # OOD check: absolute confidence alone has real limits — a hard
+        # but genuine photo can score lower than a confidently-wrong guess
+        # on something unrelated. Adding a margin check (how far ahead the
+        # top guess is over the runner-up) catches more genuine-but-hard
+        # notes without fully reopening the door to unrelated images.
+        sorted_probs = np.sort(preds)[::-1]
+        second_best = float(sorted_probs[1]) if len(sorted_probs) > 1 else 0.0
+        margin = confidence - second_best
+        is_confident = confidence >= OOD_CONFIDENCE_THRESHOLD and margin >= OOD_MARGIN_THRESHOLD
 
         st.markdown('<div class="svs-section-label">02 — Analysis Results</div>', unsafe_allow_html=True)
 
@@ -319,9 +357,10 @@ with col2:
                 <div class="svs-confidence-label">Result</div>
                 <div class="svs-reject-title">⚠ Not Recognized as an Indian Currency Note</div>
                 <div class="svs-reject-body">
-                    The model's best guess (₹{predicted_label}) only reached
-                    {confidence*100:.1f}% confidence — below the
-                    {OOD_CONFIDENCE_THRESHOLD*100:.0f}% bar needed to trust a result.
+                    The model's best guess (₹{predicted_label}, {confidence*100:.1f}% confidence,
+                    {margin*100:.1f} points ahead of the runner-up) didn't clear the bar needed
+                    to trust a result (≥{OOD_CONFIDENCE_THRESHOLD*100:.0f}% confidence AND
+                    ≥{OOD_MARGIN_THRESHOLD*100:.0f} points ahead of the next guess).
                     This usually means the photo isn't a currency note, or the note
                     isn't clearly visible. Try a clear, well-lit, close-up photo of
                     a single note.
@@ -335,6 +374,36 @@ with col2:
             <img src="data:image/png;base64,{graph_b64}" style="width:100%; border-radius:8px;" />
         </div>
         """, unsafe_allow_html=True)
+
+        # ------------------------------------------------------------------
+        # Accessibility — read the note aloud for visually impaired users.
+        # Deliberately independent of the CNN/OOD result above: this asks
+        # Gemini to look at the photo itself, so it works (and is honest)
+        # even when the app's own model was uncertain.
+        # ------------------------------------------------------------------
+        st.markdown('<div class="svs-confidence-label" style="margin:0.3rem 0 0.6rem;">Accessibility</div>', unsafe_allow_html=True)
+        if st.button("🔊 Read note aloud (independent AI check)", key="speak_btn", use_container_width=True):
+            if is_gemini_configured():
+                with st.spinner("Asking Gemini to look at the note..."):
+                    spoken_text, speak_error = identify_note_for_speech(image)
+                if spoken_text:
+                    st.markdown(f'<div class="svs-card">🔊 "{spoken_text}"</div>', unsafe_allow_html=True)
+                    speak_text(spoken_text)
+                else:
+                    st.warning(f"Live AI check failed, so nothing was read aloud. Debug info: {speak_error}")
+            else:
+                st.warning(
+                    "This needs a Gemini API key configured (see README) for "
+                    "an independent check. Reading the app's own prediction "
+                    "instead, as a fallback:"
+                )
+                fallback_text = (
+                    f"The app's model predicts this is a {predicted_label} rupee note."
+                    if is_confident else
+                    "The app's model could not confidently identify this note."
+                )
+                st.markdown(f'<div class="svs-card">🔊 "{fallback_text}"</div>', unsafe_allow_html=True)
+                speak_text(fallback_text)
 
 st.divider()
 

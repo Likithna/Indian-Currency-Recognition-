@@ -121,6 +121,69 @@ def _call_gemini(query: str, history: list | None = None, image: Image.Image | N
     return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 
+ACCESSIBILITY_PROMPT = (
+    "You are helping a visually impaired person identify an Indian "
+    "currency note from a photo. This is an INDEPENDENT check — ignore "
+    "any other classifier's prediction, look only at the image yourself. "
+    "Respond with ONE short, clear sentence suitable for text-to-speech, "
+    "e.g. 'This is a five hundred rupee note.' Spell the denomination out "
+    "in words, not digits, since digits read awkwardly aloud. If you "
+    "cannot clearly identify an Indian currency note in the image, say so "
+    "plainly instead, e.g. 'I cannot clearly identify a currency note in "
+    "this image.' Do not add any extra commentary, caveats, or disclaimers."
+)
+
+
+def identify_note_for_speech(image: Image.Image):
+    """
+    Independent vision check for the accessibility "read aloud" feature.
+    Deliberately does NOT use the app's own CNN prediction — it asks
+    Gemini to look at the image itself, so a blind user gets a genuinely
+    independent second opinion spoken aloud rather than the model's own
+    guess read back to them.
+
+    Returns (spoken_text, error_detail). error_detail is None on success,
+    'no_api_key' if Gemini isn't configured, or a diagnostic string if the
+    call failed.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        return None, "no_api_key"
+
+    try:
+        b64_data = _pil_to_base64(image, fmt="JPEG")
+        contents = [{
+            "role": "user",
+            "parts": [
+                {"inlineData": {"mimeType": "image/jpeg", "data": b64_data}},
+                {"text": "What Indian currency note, if any, is shown in this image?"},
+            ],
+        }]
+        payload = {
+            "contents": contents,
+            "systemInstruction": {"parts": [{"text": ACCESSIBILITY_PROMPT}]},
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 60},
+        }
+        response = requests.post(
+            GEMINI_URL,
+            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return text, None
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else "?"
+        body = e.response.text[:300] if e.response is not None else str(e)
+        return None, f"HTTP {status}: {body}"
+    except requests.exceptions.RequestException as e:
+        return None, f"Network error: {type(e).__name__}: {e}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
 # --------------------------------------------------------------------------
 # Offline FAQ fallback (TF-IDF + cosine similarity)
 # --------------------------------------------------------------------------
