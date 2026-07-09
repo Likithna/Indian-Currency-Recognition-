@@ -107,7 +107,14 @@ def _call_gemini(query: str, history: list | None = None, image: Image.Image | N
     payload = {
         "contents": contents,
         "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 400},
+        "generationConfig": {
+            "temperature": 0.4,
+            "maxOutputTokens": 500,
+            # Same fix as identify_note_for_speech below: cap thinking so
+            # it can't silently consume the whole output budget and leave
+            # an empty response.
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
     }
 
     response = requests.post(
@@ -118,7 +125,21 @@ def _call_gemini(query: str, history: list | None = None, image: Image.Image | N
     )
     response.raise_for_status()
     data = response.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+    candidates = data.get("candidates") or []
+    if not candidates:
+        block_reason = data.get("promptFeedback", {}).get("blockReason")
+        raise RuntimeError(f"No response from Gemini (blockReason={block_reason})")
+
+    parts = candidates[0].get("content", {}).get("parts")
+    if not parts:
+        finish_reason = candidates[0].get("finishReason", "unknown")
+        raise RuntimeError(f"Gemini returned no text (finishReason={finish_reason})")
+
+    text = parts[0].get("text", "").strip()
+    if not text:
+        raise RuntimeError("Gemini returned an empty response")
+    return text
 
 
 ACCESSIBILITY_PROMPT = (
@@ -164,7 +185,18 @@ def identify_note_for_speech(image: Image.Image):
         payload = {
             "contents": contents,
             "systemInstruction": {"parts": [{"text": ACCESSIBILITY_PROMPT}]},
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 20},
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 200,
+                # Gemini 2.5 Flash "thinks" by default, and those hidden
+                # thinking tokens are deducted from maxOutputTokens — with
+                # a small budget that can silently eat the ENTIRE budget,
+                # leaving no tokens for the actual visible answer (which
+                # is exactly what caused the earlier KeyError: 'parts').
+                # This is a simple lookup task with no reasoning needed,
+                # so thinking is switched off entirely.
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
         }
         response = requests.post(
             GEMINI_URL,
@@ -174,7 +206,20 @@ def identify_note_for_speech(image: Image.Image):
         )
         response.raise_for_status()
         data = response.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            block_reason = data.get("promptFeedback", {}).get("blockReason")
+            return None, f"No response from Gemini (blockReason={block_reason})"
+
+        parts = candidates[0].get("content", {}).get("parts")
+        if not parts:
+            finish_reason = candidates[0].get("finishReason", "unknown")
+            return None, f"Gemini returned no text (finishReason={finish_reason})"
+
+        text = parts[0].get("text", "").strip()
+        if not text:
+            return None, "Gemini returned an empty response"
         return text, None
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else "?"
