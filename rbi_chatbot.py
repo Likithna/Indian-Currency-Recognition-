@@ -157,6 +157,83 @@ ACCESSIBILITY_PROMPT = (
 )
 
 
+VERIFY_PROMPT = (
+    "You are a strict verification check for an image classifier. "
+    "Answer with ONLY the single word YES or NO — nothing else, no "
+    "punctuation, no explanation. "
+    "Question: does this image clearly show a genuine Indian currency "
+    "banknote (paper money), and NOT a person, face, animal, object, "
+    "document, screenshot, or anything else? "
+    "Answer YES only if a banknote is clearly and unambiguously the "
+    "subject of the photo. If there is any doubt, answer NO."
+)
+
+
+def verify_is_currency_note(image: Image.Image):
+    """
+    Fast independent semantic check: does Gemini agree the image actually
+    shows a currency note at all? This exists because confidence+margin
+    heuristics on the CNN's own softmax output have a real blind spot —
+    the model can be highly confident AND have a wide margin on an image
+    it's never been trained to recognize (e.g. a photo of a person),
+    because it was only ever trained to choose among 11 currency classes.
+    This asks a genuinely separate vision model the actual question
+    instead of just reading the CNN's confidence.
+
+    Returns (is_note, error_detail):
+      is_note: True / False, or None if the check couldn't be completed
+                (caller should treat None as "trust the CNN result").
+      error_detail: None on success, else a short diagnostic string.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        return None, "no_api_key"
+
+    try:
+        b64_data = _pil_to_base64(image, fmt="JPEG")
+        contents = [{
+            "role": "user",
+            "parts": [
+                {"inlineData": {"mimeType": "image/jpeg", "data": b64_data}},
+                {"text": "Is this image a genuine Indian currency banknote?"},
+            ],
+        }]
+        payload = {
+            "contents": contents,
+            "systemInstruction": {"parts": [{"text": VERIFY_PROMPT}]},
+            "generationConfig": {
+                "temperature": 0.0,
+                "maxOutputTokens": 200,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        }
+        response = requests.post(
+            GEMINI_URL,
+            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return None, "no_candidates"
+        parts = candidates[0].get("content", {}).get("parts")
+        if not parts:
+            finish_reason = candidates[0].get("finishReason", "unknown")
+            return None, f"empty_response (finishReason={finish_reason})"
+
+        text = parts[0].get("text", "").strip().upper()
+        if text.startswith("Y"):
+            return True, None
+        if text.startswith("N"):
+            return False, None
+        return None, f"unexpected response: {text[:50]}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
 def identify_note_for_speech(image: Image.Image):
     """
     Independent vision check for the accessibility "read aloud" feature.

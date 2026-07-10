@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from security_features import get_security_info
-from rbi_chatbot import get_chatbot_response, is_gemini_configured, identify_note_for_speech
+from rbi_chatbot import get_chatbot_response, is_gemini_configured, identify_note_for_speech, verify_is_currency_note
 
 # --------------------------------------------------------------------------
 # Config
@@ -297,15 +297,32 @@ with col2:
         predicted_label = class_names[top_idx]
         confidence = float(preds[top_idx])
 
-        # OOD check: absolute confidence alone has real limits — a hard
-        # but genuine photo can score lower than a confidently-wrong guess
-        # on something unrelated. Adding a margin check (how far ahead the
+        # OOD check, stage 1: absolute confidence alone has real limits —
+        # a hard but genuine photo can score lower than a confidently-wrong
+        # guess on something unrelated. A margin check (how far ahead the
         # top guess is over the runner-up) catches more genuine-but-hard
         # notes without fully reopening the door to unrelated images.
         sorted_probs = np.sort(preds)[::-1]
         second_best = float(sorted_probs[1]) if len(sorted_probs) > 1 else 0.0
         margin = confidence - second_best
         is_confident = confidence >= OOD_CONFIDENCE_THRESHOLD and margin >= OOD_MARGIN_THRESHOLD
+
+        # OOD check, stage 2: confidence+margin still has a blind spot —
+        # the CNN was only ever trained to pick among 11 currency classes,
+        # so it can be BOTH highly confident AND have a wide margin on
+        # something it's never seen (e.g. a person's photo), since it has
+        # no concept of "none of the above". If stage 1 passed, ask Gemini
+        # the actual question directly: is this really a currency note?
+        gemini_overrode_rejection = False
+        if is_confident and is_gemini_configured():
+            with st.spinner("Verifying with an independent AI check..."):
+                gemini_says_note, _verify_err = verify_is_currency_note(image)
+            if gemini_says_note is False:
+                is_confident = False
+                gemini_overrode_rejection = True
+            # if gemini_says_note is None (call failed/no key/ambiguous),
+            # fail open and trust the CNN's own result rather than block
+            # the whole app on a flaky network call.
 
         st.markdown('<div class="svs-section-label">02 — Analysis Results</div>', unsafe_allow_html=True)
 
@@ -352,21 +369,35 @@ with col2:
             </div>
             """, unsafe_allow_html=True)
         else:
-            st.markdown(f"""
-            <div class="svs-card" style="border-color: var(--warn);">
-                <div class="svs-confidence-label">Result</div>
-                <div class="svs-reject-title">⚠ Not Recognized as an Indian Currency Note</div>
-                <div class="svs-reject-body">
-                    The model's best guess (₹{predicted_label}, {confidence*100:.1f}% confidence,
-                    {margin*100:.1f} points ahead of the runner-up) didn't clear the bar needed
-                    to trust a result (≥{OOD_CONFIDENCE_THRESHOLD*100:.0f}% confidence AND
-                    ≥{OOD_MARGIN_THRESHOLD*100:.0f} points ahead of the next guess).
-                    This usually means the photo isn't a currency note, or the note
-                    isn't clearly visible. Try a clear, well-lit, close-up photo of
-                    a single note.
+            if gemini_overrode_rejection:
+                st.markdown(f"""
+                <div class="svs-card" style="border-color: var(--warn);">
+                    <div class="svs-confidence-label">Result</div>
+                    <div class="svs-reject-title">⚠ Not Recognized as an Indian Currency Note</div>
+                    <div class="svs-reject-body">
+                        The image classifier guessed ₹{predicted_label} ({confidence*100:.1f}% confidence),
+                        but an independent AI vision check confirmed this photo does
+                        <strong>not</strong> actually show a currency note. Try a clear,
+                        well-lit, close-up photo of a single note instead.
+                    </div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="svs-card" style="border-color: var(--warn);">
+                    <div class="svs-confidence-label">Result</div>
+                    <div class="svs-reject-title">⚠ Not Recognized as an Indian Currency Note</div>
+                    <div class="svs-reject-body">
+                        The model's best guess (₹{predicted_label}, {confidence*100:.1f}% confidence,
+                        {margin*100:.1f} points ahead of the runner-up) didn't clear the bar needed
+                        to trust a result (≥{OOD_CONFIDENCE_THRESHOLD*100:.0f}% confidence AND
+                        ≥{OOD_MARGIN_THRESHOLD*100:.0f} points ahead of the next guess).
+                        This usually means the photo isn't a currency note, or the note
+                        isn't clearly visible. Try a clear, well-lit, close-up photo of
+                        a single note.
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
         st.markdown(f"""
         <div class="svs-card">
@@ -397,11 +428,16 @@ with col2:
                     "an independent check. Reading the app's own prediction "
                     "instead, as a fallback:"
                 )
-                fallback_text = (
-                    f"The app's model predicts this is a {predicted_label} rupee note."
-                    if is_confident else
-                    "The app's model could not confidently identify this note."
-                )
+                _denom_words = {
+                    "10": "Ten Rupees", "20": "Twenty Rupees", "50": "Fifty Rupees",
+                    "100": "Hundred Rupees", "200": "Two Hundred Rupees",
+                    "500": "Five Hundred Rupees", "2000": "Two Thousand Rupees",
+                }
+                fallback_text = "Not a currency note"
+                if is_confident:
+                    _info = get_security_info(predicted_label)
+                    _denom_key = _info["denomination"] if _info else None
+                    fallback_text = _denom_words.get(_denom_key, f"{predicted_label} Rupees")
                 st.markdown(f'<div class="svs-card">🔊 "{fallback_text}"</div>', unsafe_allow_html=True)
                 speak_text(fallback_text)
 
